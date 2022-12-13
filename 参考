@@ -1,0 +1,87 @@
+[参考](https://www.cnblogs.com/yzhyingcool/p/10657350.html)
+ArcGis dbf读写——挂接Excel到属性表 C#
+ArcMap提供了挂接Excel表格信息到属性表的功能，但是当数据量较大到以万计甚至十万计的时候这个功能就歇菜了，当然，你可以考虑分段挂接。这个挂接功能只是做了一个表关联，属性记录每个字段的信息需要通过“字段计算器”计算过来。
+
+Excel数据写入ArcGis属性表功能开发实例中，博主见到太多使用UpdateCursor的方式，界面卡翔，效率感人。
+
+ArcGis Shapefile的属性表信息存放在一个dbf格式(dbaseIV,dbf4,dbase4，下称dbf4)的文件中，那么，有没有一种方式可以通过直接对它的读写实现快速挂接？通过数据库连接的方式可以实现，但是对客户机的环境配置有要求，起码得有OLEDB、ODBC驱动……，这样整不爽。那么，有没有一种方式可以借由第三库或者某种方式去直接解析它呢？博主去分析了这个可能，DBF文件的结构并不复杂，找个比较成熟的轮子来研究解析最好不过，去年，博主在GitHub发现了它——“FastDBF”，地址：https://github.com/SocialExplorer/FastDBF。该库作者是老外，所以不出意外的对于中文环境下dbf文件的读写不友好，有点儿小bug，相关说明可以查找本人博客。
+
+优点：插件方式开发下不操作ArcObject对象，并且可以使用多线程+委托的方式使挂接在子线程进行，进度传回主线程更新UI，挂接速度快且不影响ArcMap的浏览使用。
+
+
+
+dbf4文件格式与解析
+本篇不讲，可以自行百度或参考：
+
+https://www.clicketyclick.dk/databases/xbase/format/dbf.html
+
+需要提醒的是网上的格式解析说明文章都将dbf4编码规则默认为ANSI（中文操作系统下是gbk,codepage=936，在非英文操作系统下，这些文章写为ASCII并不严谨）去解析，而实际上ArcGis10.2之后版本生成的dbf文件默认使用了utf-8（codepage65001）编码。这就牵涉到了“FastDBF”在中文环境下的bug。
+
+FastDBF读写dbf4文件
+打开dbf文件，注意选择字符编码规则
+
+var odbf = new DbfFile(Encoding.GetEncoding(rdoGBK.Checked ? 936 : 65001));
+odbf.Open(dbfPath, FileMode.Open);
+读取记录数、字段数、长度
+
+复制代码
+var header=odbf.Header;
+int dbfRecordCount=Convert.ToInt32( header.RecordCount);
+//header.ColumnCount字段数
+for (int i = 0; i < header.ColumnCount; i++)
+{
+    this.dataGridView2.Rows.Add();
+//字段名
+    this.dataGridView2[0, i].Value = header[i].Name;
+//字段类型
+    this.dataGridView2[2, i].Value = header[i].ColumnType.ToString();
+//字段长度与小数位
+    if (header[i].DecimalCount!=0)
+    {
+        this.dataGridView2[3, i].Value = header[i].Length.ToString() + "," + header[i].DecimalCount;
+    }
+    else
+        this.dataGridView2[3, i].Value = header[i].Length.ToString();
+}
+复制代码
+从DataTable中匹配记录挂接，Excel装入DataTable可以使用epplus，不讲。
+
+复制代码
+var odbf = new DbfFile(Encoding.GetEncoding(prms.encode));
+DbfRecord orec;
+try
+{
+    odbf.Open(prms.dbfPath, FileMode.Open);
+    orec = odbf.Read(0);
+    int i = 1;
+    while (orec != null)
+    {
+        DataRow[] dataRows = dt.Select(linkFieldNameExcel + "=" + "'" + orec[prms.linkFieldIndexShp].ToString() + "'");
+        if (dataRows.Count() > 0)
+        {
+            DataRow dr = dataRows.First();
+            foreach (var item in prms.updateFieldPrms)
+            {   string content=dr[item.fieldNamesExcel].ToString();
+                int byteCount= Encoding.GetEncoding(prms.encode).GetByteCount(content);
+                if (byteCount<=item.fieldLength)
+                {
+                    orec[item.fieldNameDbf] = content;
+                }
+            }
+            odbf.Update(orec);
+        }
+        orec = odbf.ReadNext();
+        ProgressChanged(this, i);
+        i++;
+    }
+}
+catch (Exception)
+{
+    throw new Exception("dbf挂接过程出错！");
+}
+finally
+{
+    dt.Dispose();
+    orec = null;
+    odbf.Close();
+}
